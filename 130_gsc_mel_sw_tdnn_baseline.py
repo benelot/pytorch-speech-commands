@@ -68,7 +68,8 @@ parser.add_argument("--background-noise", type=str, default='datasets/speech_com
 parser.add_argument("--comment", type=str, default='', help='comment in tensorboard title')
 parser.add_argument("--batch-size", type=int, default=128, help='batch size')
 parser.add_argument("--dataload-workers-nums", type=int, default=6, help='number of workers for dataloader')
-parser.add_argument("--optim", choices=['sgd', 'adam'], default='sgd', help='choices of optimization algorithms')
+parser.add_argument("--weight-decay", type=float, default=0, help='weight decay')
+parser.add_argument("--optim", choices=['sgd', 'adam'], default='adam', help='choices of optimization algorithms')
 parser.add_argument("--learning-rate", type=float, default=5e-5, help='learning rate for optimization')
 parser.add_argument("--lr-scheduler", choices=['plateau', 'step'], default='plateau', help='method to adjust learning rate')
 parser.add_argument("--lr-scheduler-patience", type=int, default=5, help='lr scheduler plateau: Number of epochs with no improvement after which learning rate will be reduced')
@@ -77,6 +78,7 @@ parser.add_argument("--lr-scheduler-gamma", type=float, default=0.5, help='learn
 parser.add_argument("--max-epochs", type=int, default=150, help='max number of epochs')
 parser.add_argument("--resume", type=str, help='checkpoint file to resume')
 parser.add_argument("--input", choices=['mel32','mel40'], default='mel32', help='input of NN')
+parser.add_argument('--mixup', action='store_true', help='use mixup')
 args = parser.parse_known_args()[0]
 
 params['with_neptune'] = not args.no_neptune
@@ -98,6 +100,26 @@ print("Using learning rate: {}".format(params['lr']))
 name = "130-gsc-mel-classification"
 
 torch.manual_seed(params["seed"])
+
+class SlidingWindow:
+
+    def __init__(self, data, window_size, dilation=1):
+        self.data = data
+        self.dilation = dilation
+        self.window_size = window_size
+        self.window_idx = 0
+
+    def __len__(self):
+        return self.data.shape[-1] - self.dilation * (self.window_size - 1)
+
+    def __getitem__(self, idx):
+        if self.window_idx >= len(self):
+            raise StopIteration
+
+        window = torch.squeeze(self.data[:, :, :, self.window_idx:self.window_idx + self.dilation * self.window_size:self.dilation])
+
+        self.window_idx += 1
+        return window
 
 
 # import neptune and connect to neptune.ai
@@ -126,8 +148,6 @@ try:
 
     params['name'] = name
 
-
-    # %%
 
     use_gpu = torch.cuda.is_available()
     print('use_gpu', use_gpu)
@@ -162,8 +182,6 @@ try:
                                 pin_memory=use_gpu, num_workers=args.dataload_workers_nums)
 
 
-    # %%
-
     # a name used to save checkpoints etc.
     full_name = '%s_%s_%s_bs%d_lr%.1e' % ("MLPBase", args.optim, args.lr_scheduler, args.batch_size, args.learning_rate)
     if args.comment:
@@ -180,9 +198,9 @@ try:
     criterion = torch.nn.CrossEntropyLoss()
 
     if args.optim == 'sgd':
-        optimizer = torch.optim.SGD(model.parameters(), lr=args.learning_rate, momentum=0.9)
+        optimizer = torch.optim.SGD(model.parameters(), lr=args.learning_rate, momentum=0.9, weight_decay=args.weight_decay)
     else:
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
     start_timestamp = int(time.time()*1000)
     start_epoch = 0
@@ -213,63 +231,6 @@ try:
         return optimizer.param_groups[0]['lr']
 
 
-    def train(epoch):
-        global global_step
-
-        print("epoch %3d with lr=%.02e" % (epoch, get_lr()))
-        phase = 'train'
-        run[f'{phase}/learning_rate'].append(get_lr())
-        # mlflow.log_metric('%s/learning_rate' % phase,  get_lr(), step=epoch)
-
-        model.train()  # Set model to training mode
-
-        running_loss = 0.0
-        it = 0
-        correct = 0
-        total = 0
-
-        pbar = tqdm(train_dataloader, unit="audios", unit_scale=train_dataloader.batch_size)
-        for batch in pbar:
-            inputs = batch['input']
-            inputs = torch.unsqueeze(inputs, 1)
-            targets = batch['target']
-
-            if use_gpu:
-                inputs = inputs.cuda()
-                targets = targets.cuda()
-
-            # forward/backward
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            # statistics
-            it += 1
-            global_step += 1
-            running_loss += loss.item()
-            pred = outputs.data.max(1, keepdim=True)[1]
-            correct += pred.eq(targets.data.view_as(pred)).sum()
-            total += targets.size(0)
-
-            # mlflow.log_metric('%s/loss' % phase, loss.item(), step=global_step)
-            run[f'{phase}/loss'].log(loss.item())
-
-            # update the progress bar
-            pbar.set_postfix({
-                'loss': "%.05f" % (running_loss / it),
-                'acc': "%.02f%%" % (100*correct/total)
-            })
-
-        accuracy = correct/total
-        epoch_loss = running_loss / it
-        run[f'{phase}/accuracy'].log(100*accuracy)
-        # mlflow.log_metric('%s/accuracy' % phase, 100*accuracy, step=epoch)
-        run[f'{phase}/epoch_loss'].log(epoch_loss)
-        # mlflow.log_metric('%s/epoch_loss' % phase, epoch_loss, step=epoch)
-
-
     def train_temporal_style(epoch):
         global global_step
 
@@ -287,7 +248,6 @@ try:
         correct_samples_cnt = 0
         total_samples_cnt = 0
 
-
         pbar = tqdm(train_dataloader, unit="audios", unit_scale=train_dataloader.batch_size)
         for batch in pbar:
             inputs = batch['input']
@@ -299,16 +259,14 @@ try:
                 targets = targets.cuda()
 
             prediction_probabilities = []
-            for i in range(inputs.shape[-1]):
-                end_ix = i + model.input_size
 
-                if end_ix > inputs.shape[-1]:
-                    break
+            memory = SlidingWindow(inputs, model.input_size)
+            for input in memory:
 
-                out = model(np.squeeze(inputs[: ,: ,: ,i:end_ix]))
-                loss = criterion(out, targets)
-                _, pred_label = torch.max(out, 1)
-                prediction_probabilities.append(np.expand_dims(out.detach().cpu().numpy(), axis=-1))
+                outputs = model(input)
+                loss = criterion(outputs, targets)
+                _, pred_label = torch.max(outputs, 1)
+                prediction_probabilities.append(np.expand_dims(outputs.detach().cpu().numpy(), axis=-1))
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -342,78 +300,6 @@ try:
         run[f'{phase}/epoch_loss'].log(epoch_loss)
         # mlflow.log_metric('%s/epoch_loss' % phase, epoch_loss, step=epoch)
 
-    def validate(epoch):
-        global best_accuracy, best_loss, global_step
-
-        phase = 'valid'
-        model.eval()  # Set model to evaluate mode
-
-        running_loss = 0.0
-        it = 0
-        correct = 0
-        total = 0
-
-        pbar = tqdm(valid_dataloader, unit="audios", unit_scale=valid_dataloader.batch_size)
-        for batch in pbar:
-            inputs = batch['input']
-            inputs = torch.unsqueeze(inputs, 1)
-            targets = batch['target']
-
-            if use_gpu:
-                inputs = inputs.cuda()
-                targets = targets.cuda()
-
-            # forward
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-
-            # statistics
-            it += 1
-            global_step += 1
-            running_loss += loss.item()
-            pred = outputs.data.max(1, keepdim=True)[1]
-            correct += pred.eq(targets.data.view_as(pred)).sum()
-            total += targets.size(0)
-
-            run[f'{phase}/loss'].log(running_loss/it)
-            # mlflow.log_metric('%s/loss' % phase, loss.item(), step=global_step)
-
-            # update the progress bar
-            pbar.set_postfix({
-                'loss': "%.05f" % (running_loss / it),
-                'acc': "%.02f%%" % (100*correct/total)
-            })
-
-        accuracy = correct/total
-        epoch_loss = running_loss / it
-        run[f'{phase}/accuracy'].log(100*accuracy)
-        # mlflow.log_metric('%s/accuracy' % phase, 100*accuracy, step=epoch)
-        run[f'{phase}/epoch_loss'].log(epoch_loss)
-        # mlflow.log_metric('%s/epoch_loss' % phase, epoch_loss, step=epoch)
-
-        checkpoint = {
-            'epoch': epoch,
-            'step': global_step,
-            'state_dict': model.state_dict(),
-            'loss': epoch_loss,
-            'accuracy': accuracy,
-            'optimizer' : optimizer.state_dict(),
-        }
-
-        if accuracy > best_accuracy:
-            best_accuracy = accuracy
-            torch.save(checkpoint, 'checkpoints/best-loss-speech-commands-checkpoint-%s.pth' % full_name)
-            torch.save(model, 'checkpoints/%d-%s-best-loss.pth' % (start_timestamp, full_name))
-        if epoch_loss < best_loss:
-            best_loss = epoch_loss
-            torch.save(checkpoint, 'checkpoints/best-acc-speech-commands-checkpoint-%s.pth' % full_name)
-            torch.save(model, 'checkpoints/%d-%s-best-acc.pth' % (start_timestamp, full_name))
-
-        torch.save(checkpoint, 'checkpoints/last-speech-commands-checkpoint.pth')
-        del checkpoint  # reduce memory
-
-        return epoch_loss
-
     def validate_temporal_style(epoch):
         global best_accuracy, best_loss, global_step
 
@@ -437,15 +323,11 @@ try:
                 inputs = inputs.cuda()
                 targets = targets.cuda()
 
-
             prediction_probabilities = []
-            for i in range(inputs.shape[-1]):
-                end_ix = i + model.input_size
+            memory = SlidingWindow(inputs, model.input_size)
+            for input in memory:
 
-                if end_ix > inputs.shape[-1]:
-                    break
-
-                out = model(np.squeeze(inputs[:, : ,: ,i:end_ix]))
+                out = model(input)
                 loss = criterion(out, targets)
                 _, pred_label = torch.max(out, 1)
                 prediction_probabilities.append(np.expand_dims(out.detach().cpu().numpy(), axis=-1))
@@ -462,7 +344,7 @@ try:
             total_samples_cnt += len(target)
             global_step += 1
 
-            run[f'{phase}/loss'].log(loss.item())
+            run[f'{phase}/loss'].log(running_loss/it)
             # mlflow.log_metric('%s/loss' % phase, loss.item(), step=global_step)
 
             # update the progress bar
@@ -473,7 +355,6 @@ try:
 
         accuracy = correct_samples_cnt/total_samples_cnt
         epoch_loss = running_loss / it
-
         run[f'{phase}/accuracy'].log(100*accuracy)
         # mlflow.log_metric('%s/accuracy' % phase, 100*accuracy, step=epoch)
         run[f'{phase}/epoch_loss'].log(epoch_loss)
@@ -501,7 +382,6 @@ try:
         del checkpoint  # reduce memory
 
         return epoch_loss
-    # %%
 
     print(f"training on Google speech commands ({len(CLASSES)} classes)...")
     since = time.time()
@@ -509,8 +389,6 @@ try:
         if args.lr_scheduler == 'step':
             lr_scheduler.step()
 
-        # train(epoch)
-        # epoch_loss = validate(epoch)
         train_temporal_style(epoch)
         epoch_loss = validate_temporal_style(epoch)
 
@@ -521,7 +399,6 @@ try:
         time_str = 'total time elapsed: {:.0f}h {:.0f}m {:.0f}s '.format(time_elapsed // 3600, time_elapsed % 3600 // 60, time_elapsed % 60)
         print("%s, best accuracy: %.02f%%, best loss %f" % (time_str, 100*best_accuracy, best_loss))
     print("finished")
-
     # %%
 except KeyboardInterrupt:
     print('Interrupted')
