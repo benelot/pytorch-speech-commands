@@ -81,6 +81,9 @@ parser.add_argument("--input", choices=['mel32','mel40'], default='mel32', help=
 parser.add_argument('--mixup', action='store_true', help='use mixup')
 args = parser.parse_known_args()[0]
 
+params['optim'] = args.optim
+print("Using optimizer: {}".format(params['optim']))
+
 params['with_neptune'] = not args.no_neptune
 print("Using neptune: {}".format(params['with_neptune']))
 
@@ -95,6 +98,18 @@ print("Using batch size: {}".format(params['batch_size']))
 
 params['lr'] = args.learning_rate
 print("Using learning rate: {}".format(params['lr']))
+
+params['lr_scheduler'] = args.lr_scheduler
+print("Using lr scheduler: {}".format(params['lr_scheduler']))
+
+params['lr_scheduler_patience'] = args.lr_scheduler_patience
+print("Using lr scheduler patience: {}".format(params['lr_scheduler_patience']))
+
+params['lr_scheduler_step_size'] = args.lr_scheduler_step_size
+print("Using lr scheduler step size: {}".format(params['lr_scheduler_step_size']))
+
+params['lr_scheduler_gamma'] = args.lr_scheduler_gamma
+print("Using lr scheduler gamma: {}".format(params['lr_scheduler_gamma']))
 
 # import neptune and connect to neptune.ai
 name = "130-gsc-mel-classification"
