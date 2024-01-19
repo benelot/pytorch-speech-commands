@@ -64,7 +64,7 @@ parser.add_argument("--lr-scheduler-gamma", type=float, default=0.1, help='learn
 parser.add_argument("--max-epochs", type=int, default=70, help='max number of epochs')
 parser.add_argument("--resume", type=str, help='checkpoint file to resume')
 parser.add_argument("--model", choices=models.available_models, default=models.available_models[0], help='model of NN')
-parser.add_argument("--input", choices=['mel32'], default='mel32', help='input of NN')
+parser.add_argument("--input", choices=['mel32','mel40'], default='mel32', help='input of NN')
 parser.add_argument('--mixup', action='store_true', help='use mixup')
 args = parser.parse_args()
 
@@ -212,17 +212,14 @@ try:
 
         running_loss = 0.0
         it = 0
-        correct = 0
-        total = 0
+        correct_samples_cnt = 0
+        total_samples_cnt = 0
 
         pbar = tqdm(train_dataloader, unit="audios", unit_scale=train_dataloader.batch_size)
         for batch in pbar:
             inputs = batch['input']
             inputs = torch.unsqueeze(inputs, 1)
             targets = batch['target']
-
-            if args.mixup:
-                inputs, targets = mixup(inputs, targets, num_classes=len(CLASSES))
 
             if use_gpu:
                 inputs = inputs.cuda()
@@ -245,9 +242,9 @@ try:
             pred = outputs.data.max(1, keepdim=True)[1]
             if args.mixup:
                 targets = batch['target']
-                targets = Variable(targets, requires_grad=False).cuda()
-            correct += pred.eq(targets.data.view_as(pred)).sum()
-            total += targets.size(0)
+                targets = targets.cuda()
+            correct_samples_cnt += pred.eq(targets.data.view_as(pred)).sum()
+            total_samples_cnt += targets.size(0)
 
             writer.add_scalar('%s/loss' % phase, loss.item(), global_step)
             # mlflow.log_metric('%s/loss' % phase, loss.item(), step=global_step)
@@ -256,10 +253,10 @@ try:
             # update the progress bar
             pbar.set_postfix({
                 'loss': "%.05f" % (running_loss / it),
-                'acc': "%.02f%%" % (100*correct/total)
+                'acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
             })
 
-        accuracy = correct/total
+        accuracy = correct_samples_cnt/total_samples_cnt
         epoch_loss = running_loss / it
         writer.add_scalar('%s/accuracy' % phase, 100*accuracy, epoch)
         writer.add_scalar('%s/epoch_loss' % phase, epoch_loss, epoch)
@@ -276,8 +273,8 @@ try:
 
         running_loss = 0.0
         it = 0
-        correct = 0
-        total = 0
+        correct_samples_cnt = 0
+        total_samples_cnt = 0
 
         pbar = tqdm(valid_dataloader, unit="audios", unit_scale=valid_dataloader.batch_size)
         for batch in pbar:
@@ -298,8 +295,8 @@ try:
             global_step += 1
             running_loss += loss.item()
             pred = outputs.data.max(1, keepdim=True)[1]
-            correct += pred.eq(targets.data.view_as(pred)).sum()
-            total += targets.size(0)
+            correct_samples_cnt += pred.eq(targets.data.view_as(pred)).sum()
+            total_samples_cnt += targets.size(0)
 
             writer.add_scalar('%s/loss' % phase, loss.item(), global_step)
             run[f'{phase}/loss'].log(running_loss/it)
@@ -308,10 +305,10 @@ try:
             # update the progress bar
             pbar.set_postfix({
                 'loss': "%.05f" % (running_loss / it),
-                'acc': "%.02f%%" % (100*correct/total)
+                'acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
             })
 
-        accuracy = correct/total
+        accuracy = correct_samples_cnt/total_samples_cnt
         epoch_loss = running_loss / it
         writer.add_scalar('%s/accuracy' % phase, 100*accuracy, epoch)
         writer.add_scalar('%s/epoch_loss' % phase, epoch_loss, epoch)
