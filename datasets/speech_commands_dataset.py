@@ -7,6 +7,13 @@ import numpy as np
 import librosa
 
 from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+from torch.utils.data.sampler import WeightedRandomSampler
+
+from torchvision.transforms import *
+
+from datasets import *
+from transforms import *
 
 __all__ = [ 'CLASSES', 'SpeechCommandsDataset', 'BackgroundNoiseDataset' ]
 
@@ -102,3 +109,29 @@ class BackgroundNoiseDataset(Dataset):
             data = self.transform(data)
 
         return data
+
+def get_gsc_dataloaders(n_mels, args, use_gpu):
+    data_aug_transform = Compose([ChangeAmplitude(), ChangeSpeedAndPitchAudio(), FixAudioLength(), ToSTFT(), StretchAudioOnSTFT(), TimeshiftAudioOnSTFT(), FixSTFTDimension()])
+    bg_dataset = BackgroundNoiseDataset(args.background_noise, data_aug_transform)
+    add_bg_noise = AddBackgroundNoiseOnSTFT(bg_dataset)
+    train_feature_transform = Compose([ToMelSpectrogramFromSTFT(n_mels=n_mels), DeleteSTFT(), ToTensor('mel_spectrogram', 'input')])
+    train_dataset = SpeechCommandsDataset(args.train_dataset,
+                                    Compose([LoadAudio(),
+                                            data_aug_transform,
+                                            add_bg_noise,
+                                            train_feature_transform]))
+
+    valid_feature_transform = Compose([ToMelSpectrogram(n_mels=n_mels), ToTensor('mel_spectrogram', 'input')])
+    valid_dataset = SpeechCommandsDataset(args.valid_dataset,
+                                    Compose([LoadAudio(),
+                                            FixAudioLength(),
+                                            valid_feature_transform]))
+
+    weights = train_dataset.make_weights_for_balanced_classes()
+    sampler = WeightedRandomSampler(weights, len(weights))
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler,
+                                pin_memory=use_gpu, num_workers=args.dataload_workers_nums)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False,
+                                pin_memory=use_gpu, num_workers=args.dataload_workers_nums)
+
+    return train_dataloader, valid_dataloader
