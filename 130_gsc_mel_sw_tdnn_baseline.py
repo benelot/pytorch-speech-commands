@@ -18,6 +18,10 @@ from torch.utils.data.sampler import WeightedRandomSampler
 
 from torchvision.transforms import *
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 # import models
 # from data.gsc.gsc_dataset import *
 # from data.gsc import *
@@ -35,13 +39,29 @@ import models
 from datasets import *
 from transforms import *
 from mixup import *
-from baseline_models import LinearBase, MLPBase
+#from baseline_models import LinearBase, MLPBase
 
 import neptune
 
 
+class MLPBase(nn.Module):
+  def __init__(self, input_size, output_size, hidden_size=100):
+    super(MLPBase, self).__init__()
+    self.input_size = input_size
+    self.linear1 = nn.Linear(input_size, hidden_size)
+    self.linear2 = nn.Linear(hidden_size, hidden_size)
+    self.linear3 = nn.Linear(hidden_size, output_size)
+    print("Initialized MLPBase model with {} parameters".format(self.count_params()))
 
-# %%
+  def count_params(self):
+    return sum([p.view(-1).shape[0] for p in self.parameters()])
+
+  def forward(self, x):
+    x = x.reshape(x.shape[0], -1) # flatten the input
+    h = self.linear1(x).relu()
+    h = self.linear2(h).relu() # no residual connection # TODO: the results are better without the residual connection :D
+    return self.linear3(h)
+
 
 from neptune.utils import stringify_unsupported
 import argparse
@@ -51,7 +71,7 @@ print(device)
 
 params = {
     # NN parameters
-    "model_type": "cnn",
+    "model_type": "tdnn",
     # gsc parameters
     # other parameters
     "use_cuda": True,
@@ -81,9 +101,6 @@ parser.add_argument("--input", choices=['mel32','mel40'], default='mel32', help=
 parser.add_argument('--mixup', action='store_true', help='use mixup')
 args = parser.parse_known_args()[0]
 
-params['optim'] = args.optim
-print("Using optimizer: {}".format(params['optim']))
-
 params['with_neptune'] = not args.no_neptune
 print("Using neptune: {}".format(params['with_neptune']))
 
@@ -98,18 +115,6 @@ print("Using batch size: {}".format(params['batch_size']))
 
 params['lr'] = args.learning_rate
 print("Using learning rate: {}".format(params['lr']))
-
-params['lr_scheduler'] = args.lr_scheduler
-print("Using lr scheduler: {}".format(params['lr_scheduler']))
-
-params['lr_scheduler_patience'] = args.lr_scheduler_patience
-print("Using lr scheduler patience: {}".format(params['lr_scheduler_patience']))
-
-params['lr_scheduler_step_size'] = args.lr_scheduler_step_size
-print("Using lr scheduler step size: {}".format(params['lr_scheduler_step_size']))
-
-params['lr_scheduler_gamma'] = args.lr_scheduler_gamma
-print("Using lr scheduler gamma: {}".format(params['lr_scheduler_gamma']))
 
 # import neptune and connect to neptune.ai
 name = "130-gsc-mel-classification"
@@ -163,7 +168,6 @@ try:
 
     params['name'] = name
 
-
     use_gpu = torch.cuda.is_available()
     print('use_gpu', use_gpu)
     if use_gpu:
@@ -196,15 +200,14 @@ try:
     valid_dataloader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False,
                                 pin_memory=use_gpu, num_workers=args.dataload_workers_nums)
 
-
     # a name used to save checkpoints etc.
     full_name = '%s_%s_%s_bs%d_lr%.1e' % ("MLPBase", args.optim, args.lr_scheduler, args.batch_size, args.learning_rate)
     if args.comment:
         full_name = '%s_%s' % (full_name, args.comment)
 
     # model = LinearBase(n_mels * 32, len(CLASSES))
-    kernel_size = 16
-    model = MLPBase(n_mels * kernel_size, len(CLASSES))
+    kernel_size = 8
+    model = MLPBase(n_mels * kernel_size, len(CLASSES), hidden_size=400)
     model.input_size = kernel_size
 
     if use_gpu:
@@ -238,7 +241,7 @@ try:
         del checkpoint  # reduce memory
 
     if args.lr_scheduler == 'plateau':
-        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=args.lr_scheduler_patience, factor=args.lr_scheduler_gamma)
+        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=args.lr_scheduler_patience, factor=args.lr_scheduler_gamma, eps=1e-20)
     else:
         lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_scheduler_step_size, gamma=args.lr_scheduler_gamma, last_epoch=start_epoch-1)
 
@@ -252,7 +255,6 @@ try:
         print("epoch %3d with lr=%.02e" % (epoch, get_lr()))
         phase = 'train'
         run[f'{phase}/learning_rate'].append(get_lr())
-        # mlflow.log_metric('%s/learning_rate' % phase,  get_lr(), step=epoch)
 
         model.train()  # Set model to training mode
 
@@ -300,7 +302,6 @@ try:
             global_step += 1
 
             run[f'{phase}/loss'].log(running_loss/it)
-            # mlflow.log_metric('%s/loss' % phase, running_loss/it, step=global_step)
 
             # update the progress bar
             pbar.set_postfix({
@@ -311,9 +312,7 @@ try:
         accuracy = correct_samples_cnt/total_samples_cnt
         epoch_loss = running_loss / it
         run[f'{phase}/accuracy'].log(100*accuracy)
-        # mlflow.log_metric('%s/accuracy' % phase, 100*accuracy, step=epoch)
         run[f'{phase}/epoch_loss'].log(epoch_loss)
-        # mlflow.log_metric('%s/epoch_loss' % phase, epoch_loss, step=epoch)
 
     def validate_temporal_style(epoch):
         global best_accuracy, best_loss, global_step
@@ -360,7 +359,6 @@ try:
             global_step += 1
 
             run[f'{phase}/loss'].log(running_loss/it)
-            # mlflow.log_metric('%s/loss' % phase, loss.item(), step=global_step)
 
             # update the progress bar
             pbar.set_postfix({
@@ -371,9 +369,7 @@ try:
         accuracy = correct_samples_cnt/total_samples_cnt
         epoch_loss = running_loss / it
         run[f'{phase}/accuracy'].log(100*accuracy)
-        # mlflow.log_metric('%s/accuracy' % phase, 100*accuracy, step=epoch)
         run[f'{phase}/epoch_loss'].log(epoch_loss)
-        # mlflow.log_metric('%s/epoch_loss' % phase, epoch_loss, step=epoch)
 
         checkpoint = {
             'epoch': epoch,
@@ -414,6 +410,6 @@ try:
         time_str = 'total time elapsed: {:.0f}h {:.0f}m {:.0f}s '.format(time_elapsed // 3600, time_elapsed % 3600 // 60, time_elapsed % 60)
         print("%s, best accuracy: %.02f%%, best loss %f" % (time_str, 100*best_accuracy, best_loss))
     print("finished")
-    # %%
+
 except KeyboardInterrupt:
     print('Interrupted')
