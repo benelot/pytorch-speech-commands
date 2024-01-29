@@ -4,6 +4,9 @@ from tqdm import tqdm
 from memory import SlidingWindow
 import time
 
+from neptune.utils import stringify_unsupported
+from datasets import CLASSES
+
 def get_lr(optimizer):
     return optimizer.param_groups[0]['lr']
 
@@ -13,7 +16,6 @@ def train(model, train_dataloader, criterion, optimizer, use_gpu, run):
     run[f'adaptive_lr'].append(get_lr(optimizer))
 
     model.train()  # Set model to training mode
-
     running_loss = 0.0
     it = 0
     correct_windows_cnt = 0
@@ -121,17 +123,49 @@ def validate(model, valid_dataloader, criterion, use_gpu, run):
 
     return epoch_loss
 
-def bens_run(args, params, model, train_dataloader, valid_dataloader, criterion, optimizer, lr_scheduler, run):
-    since = time.time()
-    for epoch in range(0, args.max_epochs):
-        if args.lr_scheduler == 'step':
-            lr_scheduler.step()
+def bens_run(args, params, name, memory, model, train_dataloader, valid_dataloader, criterion, optimizer, lr_scheduler):
 
-        train(model, train_dataloader, criterion, optimizer, params['use_cuda'], run)
-        epoch_loss = validate(model, valid_dataloader, criterion, params['use_cuda'], run)
+    # import neptune and connect to neptune.ai
+    try:
+        try:
+            if params['with_neptune']:
+                import neptune
+                run = neptune.init_run(
+                    project=f"generalized-latent-equilibrium/{name}",
+                    # capture_hardware_metrics=False,
+                    # capture_stdout=False,
+                    # capture_stderr=False,
+                    # https://docs.neptune.ai/logging/system_metrics/
+                )
+                print(f"Starting {name} experiment...")
+            else:
+                print(f"Starting {name} experiment without observer...")
+                run = None
+        except ModuleNotFoundError:
+            print(f"Neptune not found, starting {name} experiment without observer...")
+            run = None
 
-        if args.lr_scheduler == 'plateau':
-            lr_scheduler.step(metrics=epoch_loss)
+        # log parameters to neptune
+        if run is not None:
+            run["parameters"] = stringify_unsupported(params)
 
-        time_elapsed = time.time() - since
-        time_str = 'total time elapsed: {:.0f}h {:.0f}m {:.0f}s '.format(time_elapsed // 3600, time_elapsed % 3600 // 60, time_elapsed % 60)
+        params['name'] = name
+
+        print(f"training on Google speech commands ({len(CLASSES)} classes)...")
+        since = time.time()
+        for epoch in range(0, args.max_epochs):
+            if args.lr_scheduler == 'step':
+                lr_scheduler.step()
+
+            train(model, train_dataloader, criterion, optimizer, params['use_cuda'], run)
+            epoch_loss = validate(model, valid_dataloader, criterion, params['use_cuda'], run)
+
+            if args.lr_scheduler == 'plateau':
+                lr_scheduler.step(metrics=epoch_loss)
+
+            time_elapsed = time.time() - since
+            time_str = 'total time elapsed: {:.0f}h {:.0f}m {:.0f}s '.format(time_elapsed // 3600, time_elapsed % 3600 // 60, time_elapsed % 60)
+        print("finished")
+
+    except KeyboardInterrupt:
+        print('Interrupted')
