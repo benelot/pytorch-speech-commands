@@ -134,4 +134,24 @@ def get_gsc_dataloaders(n_mels, args, use_gpu):
     valid_dataloader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False,
                                 pin_memory=use_gpu, num_workers=args.dataload_workers_nums)
 
+
+    # make dataloaders yiel input and target instead of dict
+    class DataloaderWrapper:
+        def __init__(self, dataloader):
+            self.dataloader = dataloader
+
+        def __iter__(self):
+            for d in self.dataloader:
+                yield d['input'], d['target']
+
+        def __len__(self):
+            return len(self.dataloader)
+
+        @property
+        def batch_size(self):
+            return self.dataloader.batch_size
+
+    train_dataloader = DataloaderWrapper(train_dataloader)
+    valid_dataloader = DataloaderWrapper(valid_dataloader)
+
     return train_dataloader, valid_dataloader

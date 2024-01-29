@@ -21,10 +21,8 @@ def train(model, train_dataloader, criterion, optimizer, use_gpu, run):
     total_samples_cnt = 0
 
     pbar = tqdm(train_dataloader, unit="audios", unit_scale=train_dataloader.batch_size)
-    for batch in pbar:
-        inputs = batch['input']
+    for inputs, targets in pbar:
         inputs = torch.unsqueeze(inputs, 1)
-        targets = batch['target']
 
         if use_gpu:
             inputs = inputs.cuda()
@@ -80,10 +78,8 @@ def validate(model, valid_dataloader, criterion, use_gpu, run):
     total_samples_cnt = 0
 
     pbar = tqdm(valid_dataloader, unit="audios", unit_scale=valid_dataloader.batch_size)
-    for batch in pbar:
-        inputs = batch['input']
+    for inputs, targets in pbar:
         inputs = torch.unsqueeze(inputs, 1)
-        targets = batch['target']
 
         if use_gpu:
             inputs = inputs.cuda()
