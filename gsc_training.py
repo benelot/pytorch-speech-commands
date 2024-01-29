@@ -9,8 +9,7 @@ def get_lr(optimizer):
 
 def train(model, train_dataloader, criterion, optimizer, use_gpu, run):
 
-    phase = 'train'
-    run[f'{phase}/learning_rate'].append(get_lr(optimizer))
+    run[f'adaptive_lr'].append(get_lr(optimizer))
 
     model.train()  # Set model to training mode
 
@@ -56,22 +55,21 @@ def train(model, train_dataloader, criterion, optimizer, use_gpu, run):
         correct_samples_cnt += sum(predictions == target)
         total_samples_cnt += len(target)
 
-        run[f'{phase}/loss'].log(running_loss/it)
+        run[f'train_running_loss'].log(running_loss/it)
 
         # update the progress bar
         pbar.set_postfix({
-            'loss': "%.05f" % (running_loss / it),
-            'acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
+            'train running loss': "%.05f" % (running_loss / it),
+            'train running acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
         })
 
     accuracy = correct_samples_cnt/total_samples_cnt
     epoch_loss = running_loss / it
-    run[f'{phase}/accuracy'].log(100*accuracy)
-    run[f'{phase}/epoch_loss'].log(epoch_loss)
+    run[f'train_acc'].log(100*accuracy)
+    run[f'train_loss'].log(epoch_loss)
 
 def validate(model, valid_dataloader, criterion, use_gpu, run):
 
-    phase = 'valid'
     model.eval()  # Set model to evaluate mode
 
     running_loss = 0.0
@@ -111,17 +109,17 @@ def validate(model, valid_dataloader, criterion, use_gpu, run):
         correct_samples_cnt += sum(predictions == target)
         total_samples_cnt += len(target)
 
-        run[f'{phase}/loss'].log(running_loss/it)
+        run[f'val_running_loss'].log(running_loss/it)
 
         # update the progress bar
         pbar.set_postfix({
-            'loss': "%.05f" % (running_loss / it),
-            'acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
+            'val running loss': "%.05f" % (running_loss / it),
+            'val running acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
         })
 
     accuracy = correct_samples_cnt/total_samples_cnt
     epoch_loss = running_loss / it
-    run[f'{phase}/accuracy'].log(100*accuracy)
-    run[f'{phase}/epoch_loss'].log(epoch_loss)
+    run[f'val_acc'].log(100*accuracy)
+    run[f'val_loss'].log(epoch_loss)
 
     return epoch_loss
