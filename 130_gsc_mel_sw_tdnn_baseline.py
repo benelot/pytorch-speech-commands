@@ -25,6 +25,7 @@ class MLPBase(nn.Module):
   def __init__(self, input_size, output_size, hidden_size=100):
     super(MLPBase, self).__init__()
     self.input_size = input_size
+    self.output_size = output_size
     self.linear1 = nn.Linear(input_size, hidden_size)
     self.linear2 = nn.Linear(hidden_size, hidden_size)
     self.linear3 = nn.Linear(hidden_size, output_size)

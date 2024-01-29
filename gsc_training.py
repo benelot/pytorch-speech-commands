@@ -6,54 +6,85 @@ import time
 
 from neptune.utils import stringify_unsupported
 from datasets import CLASSES
+# from utils import tensor_linspace
 
 def get_lr(optimizer):
     return optimizer.param_groups[0]['lr']
 
 
-def train(model, train_dataloader, criterion, optimizer, use_gpu, run):
+def train(params, MemoryClass, model, train_loader, criterion, optimizer, use_le=True, feature_transform=None, run=None):
 
     run[f'adaptive_lr'].append(get_lr(optimizer))
 
-    model.train()  # Set model to training mode
+    model.train()
+    correct = 0
+    train_loss = 0
     running_loss = 0.0
     it = 0
-    correct_windows_cnt = 0
-    total_windows_cnt = 0
-    correct_samples_cnt = 0
     total_samples_cnt = 0
+    old_input, olf_target = None, None
 
-    pbar = tqdm(train_dataloader, unit="audios", unit_scale=train_dataloader.batch_size)
-    for inputs, targets in pbar:
-        inputs = torch.unsqueeze(inputs, 1)
+    pbar = tqdm(train_loader, unit="audios", unit_scale=train_loader.batch_size)
+    for batch_idx, (data, target) in enumerate(pbar):
+        data = torch.unsqueeze(data, 1)
 
-        if use_gpu:
-            inputs = inputs.cuda()
-            targets = targets.cuda()
+        if params['use_cuda']:
+            data, target = data.cuda(), target.cuda()
 
-        prediction_probabilities = []
+        if feature_transform is not None:
+            data = feature_transform(data)
 
-        memory = SlidingWindow(inputs, model.input_size)
+        pred_sum = torch.zeros(data.shape[0], model.output_size, device=data.device)
+        # implement sliding window and sum logits over windows
+        memory = MemoryClass(data, **MemoryClass.kwargs)
+        n_steps = len(memory)
+
+        # init old input
+        if old_input is None:
+            old_input = torch.zeros_like(data[:, 0])
+            old_target = torch.zeros_like(target)
+        # run model for a few steps without training
+        # if 'settling_steps' in params and params['settling_steps'] > 0:
+        #     input_trans = tensor_linspace(old_input, data[:, 0], params['settling_steps']).unsqueeze(-1)
+        #     target_trans = tensor_linspace(old_target, target, params['settling_steps'])
+        #     with torch.no_grad():
+        #         for i in range(params['settling_steps']):
+        #             model(input_trans[:, i], target_trans[:, i], beta=params['beta'])
+
         for input in memory:
-
-            outputs = model(input)
-            loss = criterion(outputs, targets)
-            _, pred_label = torch.max(outputs, 1)
-            prediction_probabilities.append(np.expand_dims(outputs.detach().cpu().numpy(), axis=-1))
-
             optimizer.zero_grad()
-            loss.backward()
+            if use_le:
+                raise NotImplementedError("LE not implemented for this model")
+                # with torch.no_grad():
+                #     for _ in range(params['n_updates']):
+                #         # calling the model automatically populates the gradients
+                #         output = model(input, target, beta=params['beta'])
+                #         loss = loss_fn(output, target, reduction='sum')
+                #         # # log exemplary memory output aka input
+                #         # if run is not None and batch_idx == 0:
+                #         #     for i in range(input.shape[1]):
+                #         #         run[f"dynamics/memory_{i}"].append(input[0, i].detach().cpu().numpy())
+            else:
+                output = model(input)
+                loss = criterion(output, target)
+
+                loss.backward()
             optimizer.step()
 
+            # average over steps
+            pred_sum += output / n_steps
+            train_loss += loss.item() / n_steps
+
             running_loss += loss.item()
-            correct_windows_cnt += (pred_label == targets).sum()
-            total_windows_cnt += targets.shape[0]
             it += 1
 
+        old_input = data[:, -1]
+        old_target = target
+
+        pred = pred_sum.argmax(dim=1, keepdim=True)
+        correct += pred.eq(target.view_as(pred)).sum().item()
         # statistics
-        predictions = np.argmax(np.mean(np.concatenate(prediction_probabilities, axis=-1), axis=-1), axis=-1)
-        target = targets.cpu().numpy().astype(np.float32)
-        correct_samples_cnt += sum(predictions == target)
+        target = target.cpu().numpy().astype(np.float32)
         total_samples_cnt += len(target)
 
         run[f'train_running_loss'].log(running_loss/it)
@@ -61,51 +92,56 @@ def train(model, train_dataloader, criterion, optimizer, use_gpu, run):
         # update the progress bar
         pbar.set_postfix({
             'train running loss': "%.05f" % (running_loss / it),
-            'train running acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
+            'train running acc': "%.02f%%" % (100*correct/total_samples_cnt)
         })
 
-    accuracy = correct_samples_cnt/total_samples_cnt
+    accuracy = correct/total_samples_cnt
     epoch_loss = running_loss / it
     run[f'train_acc'].log(100*accuracy)
     run[f'train_loss'].log(epoch_loss)
 
-def validate(model, valid_dataloader, criterion, use_gpu, run):
-
-    model.eval()  # Set model to evaluate mode
-
+def test(params, MemoryClass, model, test_loader, criterion, run=None):
+    model.eval()
+    correct = 0
     running_loss = 0.0
     it = 0
-    correct_windows_cnt = 0
-    total_windows_cnt = 0
-    correct_samples_cnt = 0
     total_samples_cnt = 0
 
-    pbar = tqdm(valid_dataloader, unit="audios", unit_scale=valid_dataloader.batch_size)
-    for inputs, targets in pbar:
-        inputs = torch.unsqueeze(inputs, 1)
+    pbar = tqdm(test_loader, unit="audios", unit_scale=test_loader.batch_size)
+    for batch_i, (data, target) in enumerate(pbar):
+        data = torch.unsqueeze(data, 1)
 
-        if use_gpu:
-            inputs = inputs.cuda()
-            targets = targets.cuda()
+        if params['use_cuda']:
+            data, target = data.cuda(), target.cuda()
 
-        prediction_probabilities = []
-        memory = SlidingWindow(inputs, model.input_size)
+        pred_sum = torch.zeros(data.shape[0], model.output_size, device=data.device)
+        memory = MemoryClass(data, **MemoryClass.kwargs)
+        n_steps = len(memory)
+
+        # # run model for a few steps without training
+        # if 'settling_steps' in params and params['settling_steps'] > 0:
+        #     # init old input
+        #     if old_input is None:
+        #         old_input = torch.zeros_like(data[:, 0])
+        #     input_trans = tensor_linspace(old_input, data[:, 0], params['settling_steps']).unsqueeze(-1)
+        #     with torch.no_grad():
+        #         for i in range(params['settling_steps']):
+        #             model(input_trans[:, i])
+
         for input in memory:
-
             out = model(input)
-            loss = criterion(out, targets)
+            loss = criterion(out, target)
             _, pred_label = torch.max(out, 1)
-            prediction_probabilities.append(np.expand_dims(out.detach().cpu().numpy(), axis=-1))
+            pred_sum += out / n_steps
 
             running_loss += loss.item()
-            correct_windows_cnt += (pred_label == targets).sum()
-            total_windows_cnt += targets.shape[0]
             it += 1
 
+        pred = pred_sum.argmax(dim=1, keepdim=True)
+        correct += pred.eq(target.view_as(pred)).sum().item()
+
         # statistics
-        predictions = np.argmax(np.mean(np.concatenate(prediction_probabilities, axis=-1), axis=-1), axis=-1)
-        target = targets.cpu().numpy().astype(np.float32)
-        correct_samples_cnt += sum(predictions == target)
+        target = target.cpu().numpy().astype(np.float32)
         total_samples_cnt += len(target)
 
         run[f'val_running_loss'].log(running_loss/it)
@@ -113,10 +149,10 @@ def validate(model, valid_dataloader, criterion, use_gpu, run):
         # update the progress bar
         pbar.set_postfix({
             'val running loss': "%.05f" % (running_loss / it),
-            'val running acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
+            'val running acc': "%.02f%%" % (100*correct/total_samples_cnt)
         })
 
-    accuracy = correct_samples_cnt/total_samples_cnt
+    accuracy = correct/total_samples_cnt
     epoch_loss = running_loss / it
     run[f'val_acc'].log(100*accuracy)
     run[f'val_loss'].log(epoch_loss)
@@ -157,8 +193,8 @@ def bens_run(args, params, name, memory, model, train_dataloader, valid_dataload
             if args.lr_scheduler == 'step':
                 lr_scheduler.step()
 
-            train(model, train_dataloader, criterion, optimizer, params['use_cuda'], run)
-            epoch_loss = validate(model, valid_dataloader, criterion, params['use_cuda'], run)
+            train(params, memory, model, train_dataloader, criterion, optimizer, use_le=params['use_le'], run=run)
+            epoch_loss = test(params, memory, model, valid_dataloader, criterion, run=run)
 
             if args.lr_scheduler == 'plateau':
                 lr_scheduler.step(metrics=epoch_loss)
