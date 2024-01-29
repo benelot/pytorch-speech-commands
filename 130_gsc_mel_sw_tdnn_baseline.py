@@ -10,18 +10,17 @@ import time
 import sys
 sys.path.append("..")
 
-from tqdm import tqdm
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from tqdm import *
-import numpy as np
 
 from datasets import CLASSES, get_gsc_dataloaders
 
 import neptune
+
+from gsc_training import train, validate
 
 
 class MLPBase(nn.Module):
@@ -75,7 +74,7 @@ parser.add_argument("--lr-scheduler-patience", type=int, default=5, help='lr sch
 parser.add_argument("--lr-scheduler-step-size", type=int, default=50, help='lr scheduler step: number of epochs of learning rate decay.')
 parser.add_argument("--lr-scheduler-gamma", type=float, default=0.5, help='learning rate is multiplied by the gamma to decrease it')
 parser.add_argument("--max-epochs", type=int, default=150, help='max number of epochs')
-parser.add_argument("--input", choices=['mel32','mel40'], default='mel32', help='input of NN')
+parser.add_argument("--n-mels", choices=[32, 40], default=32, help='input of NN')
 args = parser.parse_known_args()[0]
 
 params['with_neptune'] = not args.no_neptune
@@ -97,27 +96,6 @@ print("Using learning rate: {}".format(params['lr']))
 name = "130-gsc-mel-classification"
 
 torch.manual_seed(params["seed"])
-
-class SlidingWindow:
-
-    def __init__(self, data, window_size, dilation=1):
-        self.data = data
-        self.dilation = dilation
-        self.window_size = window_size
-        self.window_idx = 0
-
-    def __len__(self):
-        return self.data.shape[-1] - self.dilation * (self.window_size - 1)
-
-    def __getitem__(self, idx):
-        if self.window_idx >= len(self):
-            raise StopIteration
-
-        window = torch.squeeze(self.data[:, :, :, self.window_idx:self.window_idx + self.dilation * self.window_size:self.dilation])
-
-        self.window_idx += 1
-        return window
-
 
 # import neptune and connect to neptune.ai
 try:
@@ -148,16 +126,11 @@ try:
     use_gpu = torch.cuda.is_available()
     print('use_gpu', use_gpu)
     if use_gpu:
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = True # TODO: Will change acc, remove at some point
 
-    n_mels = 32
-    if args.input == 'mel40':
-        n_mels = 40
+    n_mels = args.n_mels
 
     train_dataloader, valid_dataloader = get_gsc_dataloaders(n_mels, args, use_gpu)
-
-    # a name used to save checkpoints etc.
-    full_name = '%s_%s_%s_bs%d_lr%.1e' % ("MLPBase", args.optim, args.lr_scheduler, args.batch_size, args.learning_rate)
 
     kernel_size = 8
     model = MLPBase(n_mels * kernel_size, len(CLASSES), hidden_size=400)
@@ -181,128 +154,6 @@ try:
     else:
         lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_scheduler_step_size, gamma=args.lr_scheduler_gamma, last_epoch=start_epoch-1)
 
-    def get_lr():
-        return optimizer.param_groups[0]['lr']
-
-
-    def train():
-
-        phase = 'train'
-        run[f'{phase}/learning_rate'].append(get_lr())
-
-        model.train()  # Set model to training mode
-
-        running_loss = 0.0
-        it = 0
-        correct_windows_cnt = 0
-        total_windows_cnt = 0
-        correct_samples_cnt = 0
-        total_samples_cnt = 0
-
-        pbar = tqdm(train_dataloader, unit="audios", unit_scale=train_dataloader.batch_size)
-        for batch in pbar:
-            inputs = batch['input']
-            inputs = torch.unsqueeze(inputs, 1)
-            targets = batch['target']
-
-            if use_gpu:
-                inputs = inputs.cuda()
-                targets = targets.cuda()
-
-            prediction_probabilities = []
-
-            memory = SlidingWindow(inputs, model.input_size)
-            for input in memory:
-
-                outputs = model(input)
-                loss = criterion(outputs, targets)
-                _, pred_label = torch.max(outputs, 1)
-                prediction_probabilities.append(np.expand_dims(outputs.detach().cpu().numpy(), axis=-1))
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                running_loss += loss.item()
-                correct_windows_cnt += (pred_label == targets).sum()
-                total_windows_cnt += targets.shape[0]
-                it += 1
-
-            # statistics
-            predictions = np.argmax(np.mean(np.concatenate(prediction_probabilities, axis=-1), axis=-1), axis=-1)
-            target = targets.cpu().numpy().astype(np.float32)
-            correct_samples_cnt += sum(predictions == target)
-            total_samples_cnt += len(target)
-
-            run[f'{phase}/loss'].log(running_loss/it)
-
-            # update the progress bar
-            pbar.set_postfix({
-                'loss': "%.05f" % (running_loss / it),
-                'acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
-            })
-
-        accuracy = correct_samples_cnt/total_samples_cnt
-        epoch_loss = running_loss / it
-        run[f'{phase}/accuracy'].log(100*accuracy)
-        run[f'{phase}/epoch_loss'].log(epoch_loss)
-
-    def validate():
-
-        phase = 'valid'
-        model.eval()  # Set model to evaluate mode
-
-        running_loss = 0.0
-        it = 0
-        correct_windows_cnt = 0
-        total_windows_cnt = 0
-        correct_samples_cnt = 0
-        total_samples_cnt = 0
-
-        pbar = tqdm(valid_dataloader, unit="audios", unit_scale=valid_dataloader.batch_size)
-        for batch in pbar:
-            inputs = batch['input']
-            inputs = torch.unsqueeze(inputs, 1)
-            targets = batch['target']
-
-            if use_gpu:
-                inputs = inputs.cuda()
-                targets = targets.cuda()
-
-            prediction_probabilities = []
-            memory = SlidingWindow(inputs, model.input_size)
-            for input in memory:
-
-                out = model(input)
-                loss = criterion(out, targets)
-                _, pred_label = torch.max(out, 1)
-                prediction_probabilities.append(np.expand_dims(out.detach().cpu().numpy(), axis=-1))
-
-                running_loss += loss.item()
-                correct_windows_cnt += (pred_label == targets).sum()
-                total_windows_cnt += targets.shape[0]
-                it += 1
-
-            # statistics
-            predictions = np.argmax(np.mean(np.concatenate(prediction_probabilities, axis=-1), axis=-1), axis=-1)
-            target = targets.cpu().numpy().astype(np.float32)
-            correct_samples_cnt += sum(predictions == target)
-            total_samples_cnt += len(target)
-
-            run[f'{phase}/loss'].log(running_loss/it)
-
-            # update the progress bar
-            pbar.set_postfix({
-                'loss': "%.05f" % (running_loss / it),
-                'acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
-            })
-
-        accuracy = correct_samples_cnt/total_samples_cnt
-        epoch_loss = running_loss / it
-        run[f'{phase}/accuracy'].log(100*accuracy)
-        run[f'{phase}/epoch_loss'].log(epoch_loss)
-
-        return epoch_loss
 
     print(f"training on Google speech commands ({len(CLASSES)} classes)...")
     since = time.time()
@@ -310,8 +161,8 @@ try:
         if args.lr_scheduler == 'step':
             lr_scheduler.step()
 
-        train()
-        epoch_loss = validate()
+        train(model, train_dataloader, criterion, optimizer, use_gpu, run)
+        epoch_loss = validate(model, valid_dataloader, criterion, use_gpu, run)
 
         if args.lr_scheduler == 'plateau':
             lr_scheduler.step(metrics=epoch_loss)

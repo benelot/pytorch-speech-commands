@@ -1,0 +1,127 @@
+import numpy as np
+import torch
+from tqdm import tqdm
+from memory import SlidingWindow
+
+def get_lr(optimizer):
+    return optimizer.param_groups[0]['lr']
+
+
+def train(model, train_dataloader, criterion, optimizer, use_gpu, run):
+
+    phase = 'train'
+    run[f'{phase}/learning_rate'].append(get_lr(optimizer))
+
+    model.train()  # Set model to training mode
+
+    running_loss = 0.0
+    it = 0
+    correct_windows_cnt = 0
+    total_windows_cnt = 0
+    correct_samples_cnt = 0
+    total_samples_cnt = 0
+
+    pbar = tqdm(train_dataloader, unit="audios", unit_scale=train_dataloader.batch_size)
+    for batch in pbar:
+        inputs = batch['input']
+        inputs = torch.unsqueeze(inputs, 1)
+        targets = batch['target']
+
+        if use_gpu:
+            inputs = inputs.cuda()
+            targets = targets.cuda()
+
+        prediction_probabilities = []
+
+        memory = SlidingWindow(inputs, model.input_size)
+        for input in memory:
+
+            outputs = model(input)
+            loss = criterion(outputs, targets)
+            _, pred_label = torch.max(outputs, 1)
+            prediction_probabilities.append(np.expand_dims(outputs.detach().cpu().numpy(), axis=-1))
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+            correct_windows_cnt += (pred_label == targets).sum()
+            total_windows_cnt += targets.shape[0]
+            it += 1
+
+        # statistics
+        predictions = np.argmax(np.mean(np.concatenate(prediction_probabilities, axis=-1), axis=-1), axis=-1)
+        target = targets.cpu().numpy().astype(np.float32)
+        correct_samples_cnt += sum(predictions == target)
+        total_samples_cnt += len(target)
+
+        run[f'{phase}/loss'].log(running_loss/it)
+
+        # update the progress bar
+        pbar.set_postfix({
+            'loss': "%.05f" % (running_loss / it),
+            'acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
+        })
+
+    accuracy = correct_samples_cnt/total_samples_cnt
+    epoch_loss = running_loss / it
+    run[f'{phase}/accuracy'].log(100*accuracy)
+    run[f'{phase}/epoch_loss'].log(epoch_loss)
+
+def validate(model, valid_dataloader, criterion, use_gpu, run):
+
+    phase = 'valid'
+    model.eval()  # Set model to evaluate mode
+
+    running_loss = 0.0
+    it = 0
+    correct_windows_cnt = 0
+    total_windows_cnt = 0
+    correct_samples_cnt = 0
+    total_samples_cnt = 0
+
+    pbar = tqdm(valid_dataloader, unit="audios", unit_scale=valid_dataloader.batch_size)
+    for batch in pbar:
+        inputs = batch['input']
+        inputs = torch.unsqueeze(inputs, 1)
+        targets = batch['target']
+
+        if use_gpu:
+            inputs = inputs.cuda()
+            targets = targets.cuda()
+
+        prediction_probabilities = []
+        memory = SlidingWindow(inputs, model.input_size)
+        for input in memory:
+
+            out = model(input)
+            loss = criterion(out, targets)
+            _, pred_label = torch.max(out, 1)
+            prediction_probabilities.append(np.expand_dims(out.detach().cpu().numpy(), axis=-1))
+
+            running_loss += loss.item()
+            correct_windows_cnt += (pred_label == targets).sum()
+            total_windows_cnt += targets.shape[0]
+            it += 1
+
+        # statistics
+        predictions = np.argmax(np.mean(np.concatenate(prediction_probabilities, axis=-1), axis=-1), axis=-1)
+        target = targets.cpu().numpy().astype(np.float32)
+        correct_samples_cnt += sum(predictions == target)
+        total_samples_cnt += len(target)
+
+        run[f'{phase}/loss'].log(running_loss/it)
+
+        # update the progress bar
+        pbar.set_postfix({
+            'loss': "%.05f" % (running_loss / it),
+            'acc': "%.02f%%" % (100*correct_samples_cnt/total_samples_cnt)
+        })
+
+    accuracy = correct_samples_cnt/total_samples_cnt
+    epoch_loss = running_loss / it
+    run[f'{phase}/accuracy'].log(100*accuracy)
+    run[f'{phase}/epoch_loss'].log(epoch_loss)
+
+    return epoch_loss
