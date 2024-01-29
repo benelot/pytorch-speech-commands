@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from memory import SlidingWindow
+import time
 
 def get_lr(optimizer):
     return optimizer.param_groups[0]['lr']
@@ -119,3 +120,18 @@ def validate(model, valid_dataloader, criterion, use_gpu, run):
     run[f'val_loss'].log(epoch_loss)
 
     return epoch_loss
+
+def bens_run(args, params, model, train_dataloader, valid_dataloader, criterion, optimizer, lr_scheduler, run):
+    since = time.time()
+    for epoch in range(0, args.max_epochs):
+        if args.lr_scheduler == 'step':
+            lr_scheduler.step()
+
+        train(model, train_dataloader, criterion, optimizer, params['use_cuda'], run)
+        epoch_loss = validate(model, valid_dataloader, criterion, params['use_cuda'], run)
+
+        if args.lr_scheduler == 'plateau':
+            lr_scheduler.step(metrics=epoch_loss)
+
+        time_elapsed = time.time() - since
+        time_str = 'total time elapsed: {:.0f}h {:.0f}m {:.0f}s '.format(time_elapsed // 3600, time_elapsed % 3600 // 60, time_elapsed % 60)

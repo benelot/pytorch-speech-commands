@@ -20,7 +20,7 @@ from datasets import CLASSES, get_gsc_dataloaders
 
 import neptune
 
-from gsc_training import train, validate
+from gsc_training import bens_run
 
 
 class MLPBase(nn.Module):
@@ -162,19 +162,7 @@ if __name__ == '__main__':
 
 
         print(f"training on Google speech commands ({len(CLASSES)} classes)...")
-        since = time.time()
-        for epoch in range(start_epoch, args.max_epochs):
-            if args.lr_scheduler == 'step':
-                lr_scheduler.step()
-
-            train(model, train_dataloader, criterion, optimizer, params['use_cuda'], run)
-            epoch_loss = validate(model, valid_dataloader, criterion, params['use_cuda'], run)
-
-            if args.lr_scheduler == 'plateau':
-                lr_scheduler.step(metrics=epoch_loss)
-
-            time_elapsed = time.time() - since
-            time_str = 'total time elapsed: {:.0f}h {:.0f}m {:.0f}s '.format(time_elapsed // 3600, time_elapsed % 3600 // 60, time_elapsed % 60)
+        bens_run(args, params, model, train_dataloader, valid_dataloader, criterion, optimizer, lr_scheduler, run)
         print("finished")
 
     except KeyboardInterrupt:
