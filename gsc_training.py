@@ -10,14 +10,8 @@ from tqdm import tqdm
 from datasets import CLASSES
 # from utils import tensor_linspace
 
-def get_lr(optimizer):
-    return optimizer.param_groups[0]['lr']
-
 
 def train(params, MemoryClass, model, loss_fn, train_loader, optimizer, epoch, fn_out, run=None):
-
-    run[f'adaptive_lr'].append(get_lr(optimizer))
-
     model.train()
     correct = 0
     train_loss = 0
@@ -55,16 +49,15 @@ def train(params, MemoryClass, model, loss_fn, train_loader, optimizer, epoch, f
         for input in memory:
             optimizer.zero_grad()
             if params['use_le']:
-                raise NotImplementedError("LE not implemented for this model")
-                # with torch.no_grad():
-                #     for _ in range(params['n_updates']):
-                #         # calling the model automatically populates the gradients
-                #         output = model(input, target, beta=params['beta'])
-                #         loss = loss_fn(output, target, reduction='sum')
-                #         # # log exemplary memory output aka input
-                #         # if run is not None and batch_idx == 0:
-                #         #     for i in range(input.shape[1]):
-                #         #         run[f"dynamics/memory_{i}"].append(input[0, i].detach().cpu().numpy())
+                with torch.no_grad():
+                    for _ in range(params['n_updates']):
+                        # calling the model automatically populates the gradients
+                        output = model(input, target, beta=params['beta'])
+                        loss = loss_fn(output, target, reduction='sum')
+                        # # log exemplary memory output aka input
+                        # if run is not None and batch_idx == 0:
+                        #     for i in range(input.shape[1]):
+                        #         run[f"dynamics/memory_{i}"].append(input[0, i].detach().cpu().numpy())
             else:
                 output = model(input)
                 loss = loss_fn(output, target)
@@ -157,18 +150,18 @@ def test(params, MemoryClass, model, loss_fn, test_loader, prefix='valid', lr_sc
 
             for input in memory:
                 if params['use_le']:
-                    raise NotImplementedError("LE not implemented for this model")
-                    # for _ in range(params['n_updates']):
-                        # output = model(input)
-                        # # input_list.append(input[0].detach().cpu().numpy())
-                        # # preds_activation_list.append(output[0].detach().cpu().numpy())
-                        # # average over steps
-                        # pred_sum += output / n_steps
-                        # test_loss += loss_fn(output, target, reduction='sum').item() / n_steps
+                    for _ in range(params['n_updates']):
+                        output = model(input)
+                        # input_list.append(input[0].detach().cpu().numpy())
+                        # preds_activation_list.append(output[0].detach().cpu().numpy())
+                        # average over steps
+                        pred_sum += output / n_steps
+                        test_loss += loss_fn(output, target, reduction='sum').item() / n_steps
                 else:
                     out = model(input)
                     loss = loss_fn(out, target)
                     pred_sum += out / n_steps
+                    test_loss += loss.item() / n_steps
 
                     running_loss += loss.item()
                     it += 1
@@ -215,8 +208,8 @@ def test(params, MemoryClass, model, loss_fn, test_loader, prefix='valid', lr_sc
 
     if lr_scheduler is not None:
         lr_scheduler.step(epoch_loss)
-        # if run is not None: # TODO: Will change lr logging
-            # run['adaptive_lr'].append(lr_scheduler.optimizer.param_groups[0]['lr'])
+        if run is not None:
+            run['adaptive_lr'].append(lr_scheduler.optimizer.param_groups[0]['lr'])
 
     if run is not None:
         run[f"val_acc"].append(test_acc)
