@@ -148,6 +148,10 @@ def get_gsc_dataloaders(n_mels, args, use_gpu):
             return len(self.dataloader)
 
         @property
+        def dataset(self):
+            return self.dataloader.dataset
+
+        @property
         def batch_size(self):
             return self.dataloader.batch_size
 

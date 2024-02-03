@@ -51,6 +51,7 @@ if __name__ == '__main__':
         # other parameters
         "use_cuda": True,
         "with_neptune": True,
+        "log_interval": 1e1000
     }
 
     # parse parameters from command line which often change
