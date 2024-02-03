@@ -1,10 +1,12 @@
-import numpy as np
 import torch
-from tqdm import tqdm
-from memory import SlidingWindow
-import time
-
+# import torch.nn.functional as F
+from torch.utils.data import DataLoader
+# from visualization import plot_sliding_outputs
+from sklearn.metrics import confusion_matrix
+import numpy as np
+# import matplotlib.pyplot as plt
 from neptune.utils import stringify_unsupported
+from tqdm import tqdm
 from datasets import CLASSES
 # from utils import tensor_linspace
 
@@ -12,7 +14,7 @@ def get_lr(optimizer):
     return optimizer.param_groups[0]['lr']
 
 
-def train(params, MemoryClass, model, train_loader, criterion, optimizer, epoch, fn_out, use_le=True, feature_transform=None, run=None):
+def train(params, MemoryClass, model, loss_fn, train_loader, optimizer, epoch, fn_out, run=None):
 
     run[f'adaptive_lr'].append(get_lr(optimizer))
 
@@ -24,7 +26,7 @@ def train(params, MemoryClass, model, train_loader, criterion, optimizer, epoch,
     total_samples_cnt = 0
     old_input, old_target = None, None
 
-    pbar = tqdm(train_loader, unit="audios", unit_scale=train_loader.batch_size)
+    pbar = tqdm(train_loader, unit="samples", unit_scale=train_loader.batch_size)
     for batch_idx, (data, target) in enumerate(pbar):
         batch_loss = 0
         # data = data.float() # TODO: will change acc
@@ -32,9 +34,6 @@ def train(params, MemoryClass, model, train_loader, criterion, optimizer, epoch,
 
         if params['use_cuda']:
             data, target = data.cuda(), target.cuda()
-
-        if feature_transform is not None:
-            data = feature_transform(data)
 
         pred_sum = torch.zeros(data.shape[0], model.output_size, device=data.device)
         # implement sliding window and sum logits over windows
@@ -55,7 +54,7 @@ def train(params, MemoryClass, model, train_loader, criterion, optimizer, epoch,
 
         for input in memory:
             optimizer.zero_grad()
-            if use_le:
+            if params['use_le']:
                 raise NotImplementedError("LE not implemented for this model")
                 # with torch.no_grad():
                 #     for _ in range(params['n_updates']):
@@ -68,7 +67,7 @@ def train(params, MemoryClass, model, train_loader, criterion, optimizer, epoch,
                 #         #         run[f"dynamics/memory_{i}"].append(input[0, i].detach().cpu().numpy())
             else:
                 output = model(input)
-                loss = criterion(output, target)
+                loss = loss_fn(output, target)
                 loss.backward()
             batch_loss += loss.item() / n_steps / input.shape[0]
             optimizer.step()
@@ -117,7 +116,7 @@ def train(params, MemoryClass, model, train_loader, criterion, optimizer, epoch,
 
     return train_loss, train_acc
 
-def test(params, MemoryClass, model, test_loader, criterion, feature_transform=None, epoch=0, prefix='valid', lr_scheduler=None, run=None):
+def test(params, MemoryClass, model, loss_fn, test_loader, prefix='valid', lr_scheduler=None, run=None):
     model.eval()
     correct = 0
     test_loss = 0
@@ -126,7 +125,13 @@ def test(params, MemoryClass, model, test_loader, criterion, feature_transform=N
     it = 0
     total_samples_cnt = 0
 
-    pbar = tqdm(test_loader, unit="audios", unit_scale=test_loader.batch_size)
+    # collect and plot output activations
+    preds_list = []
+    targets_list = []
+    # input_list = []
+    # preds_activation_list = []
+
+    pbar = tqdm(test_loader, unit="samples", unit_scale=test_loader.batch_size)
     if True: # TODO: dummy for torch.no_grad()
         for batch_i, (data, target) in enumerate(pbar):
             # data = data.float() # TODO: will change acc
@@ -135,8 +140,6 @@ def test(params, MemoryClass, model, test_loader, criterion, feature_transform=N
             if params['use_cuda']:
                 data, target = data.cuda(), target.cuda()
 
-            if feature_transform is not None:
-                data = feature_transform(data)
 
             pred_sum = torch.zeros(data.shape[0], model.output_size, device=data.device)
             memory = MemoryClass(data, **MemoryClass.kwargs)
@@ -164,17 +167,34 @@ def test(params, MemoryClass, model, test_loader, criterion, feature_transform=N
                         # test_loss += loss_fn(output, target, reduction='sum').item() / n_steps
                 else:
                     out = model(input)
-                    loss = criterion(out, target)
-                    _, pred_label = torch.max(out, 1)
+                    loss = loss_fn(out, target)
                     pred_sum += out / n_steps
 
                     running_loss += loss.item()
                     it += 1
 
-                old_input = data[:, -1]
+            old_input = data[:, -1]
 
             pred = pred_sum.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
+
+            preds_list.append(pred.detach().cpu().numpy())
+            targets_list.append(target.view_as(pred).detach().cpu().numpy())
+
+            # if run is not None and batch_i % 4  == 0:
+            #     # plot activations
+            #     input_signal = np.stack(input_list, axis=0)
+            #     preds_activation = np.stack(preds_activation_list, axis=0)
+            #     target_class = target[0].detach().cpu().numpy()
+            #     pred_class = pred[0].detach().cpu().numpy()
+            #     fig, ax = plot_sliding_outputs(input_signal, preds_activation)
+            #     ax[0].set_title(f'epoch {epoch}, batch {batch_i}, pred {pred_class[0]}, target {target_class}')
+            #     run[f"sliding_outputs_epoch_{epoch}_testOn_{prefix}"].append(fig)
+            #     plt.close()
+            #
+            # input_list = []
+            # preds_activation_list = []
+
 
             # statistics
             target = target.cpu().numpy().astype(np.float32)
@@ -188,14 +208,15 @@ def test(params, MemoryClass, model, test_loader, criterion, feature_transform=N
                 'val running acc': "%.02f%%" % (100*correct/total_samples_cnt)
             })
 
+    # average loss over dataset
     test_loss /= len(test_loader.dataset)
     test_acc = 100. * correct / total_samples_cnt
     epoch_loss = running_loss / it
 
     if lr_scheduler is not None:
         lr_scheduler.step(epoch_loss)
-        if run is not None:
-            run['adaptive_lr'].append(lr_scheduler.optimizer.param_groups[0]['lr'])
+        # if run is not None: # TODO: Will change lr logging
+            # run['adaptive_lr'].append(lr_scheduler.optimizer.param_groups[0]['lr'])
 
     if run is not None:
         run[f"val_acc"].append(test_acc)
@@ -203,10 +224,16 @@ def test(params, MemoryClass, model, test_loader, criterion, feature_transform=N
     print('Evaluate on', prefix, 'set: Average loss: {:.4f}, Accuracy: {}/{} ({:.2f}%)\n'.format(
         test_loss, correct, len(test_loader.dataset), test_acc))
 
+    # # plot confusion matrix to stdout (visible in neptune.ai under monitoring/stdout)
+    # preds = np.concatenate(preds_list)
+    # targets = np.concatenate(targets_list)
+    # print("Confusion matrix: ")
+    # print(confusion_matrix(preds, targets))
+
     return test_loss, test_acc
 
-def bens_run(args, params, name, memory, model, train_dataloader, valid_dataloader, criterion, optimizer, lr_scheduler):
 
+def bens_run(args, params, name, memory_type, model, loss_fn, fn_out, train_loader, val_loader, optimizer=None, lr_scheduler=None):
     # import neptune and connect to neptune.ai
     try:
         try:
@@ -233,21 +260,17 @@ def bens_run(args, params, name, memory, model, train_dataloader, valid_dataload
 
         params['name'] = name
 
-        print(f"training on Google speech commands ({len(CLASSES)} classes)...")
-        since = time.time()
+        if run is not None:
+            run['memory_type'] = str(memory_type)
+
+        # test(params, memory_type, model, loss_fn, val_loader, epoch=0, prefix='Valid', lr_scheduler=lr_scheduler, feature_transform=feature_transform, run=run)
+
+        print('Start training:')
         for epoch in range(0, args.max_epochs):
-            # if args.lr_scheduler == 'step':
-            #     lr_scheduler.step()
+            train(params, memory_type, model, loss_fn, train_loader, optimizer, epoch, fn_out, run=run)
+            test(params, memory_type, model, loss_fn, val_loader, prefix='Valid', lr_scheduler=lr_scheduler, run=run)
 
-            train(params, memory, model, train_dataloader, criterion, optimizer, epoch=epoch, fn_out=None, use_le=params['use_le'], run=run)
-            test(params, memory, model, valid_dataloader, criterion, run=run)
-
-            # if args.lr_scheduler == 'plateau':
-            #     lr_scheduler.step(metrics=epoch_loss)
-
-            time_elapsed = time.time() - since
-            time_str = 'total time elapsed: {:.0f}h {:.0f}m {:.0f}s '.format(time_elapsed // 3600, time_elapsed % 3600 // 60, time_elapsed % 60)
-        print("finished")
-
+        if fn_out is not None:
+            torch.save(model.state_dict(), fn_out.format(postfix=''))
     except KeyboardInterrupt:
         print('Interrupted')
