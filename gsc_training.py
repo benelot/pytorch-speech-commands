@@ -99,7 +99,7 @@ def train(params, MemoryClass, model, loss_fn, train_loader, optimizer, epoch, f
         })
 
     # average loss over dataset
-    train_acc = 100. * correct / total_samples_cnt
+    train_acc = 100. * correct / len(train_loader.dataset)
     epoch_loss = running_loss / it
 
     if run is not None:
@@ -203,7 +203,7 @@ def test(params, MemoryClass, model, loss_fn, test_loader, prefix='valid', lr_sc
 
     # average loss over dataset
     test_loss /= len(test_loader.dataset)
-    test_acc = 100. * correct / total_samples_cnt
+    test_acc = 100. * correct / len(test_loader.dataset)
     epoch_loss = running_loss / it
 
     if lr_scheduler is not None:
