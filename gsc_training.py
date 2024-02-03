@@ -226,7 +226,7 @@ def test(params, MemoryClass, model, loss_fn, test_loader, prefix='valid', lr_sc
     return test_loss, test_acc
 
 
-def bens_run(args, params, name, memory_type, model, loss_fn, fn_out, train_loader, val_loader, optimizer=None, lr_scheduler=None):
+def bens_run(params, name, memory_type, model, loss_fn, fn_out, train_loader, val_loader, optimizer=None, lr_scheduler=None):
     # import neptune and connect to neptune.ai
     try:
         try:
@@ -259,7 +259,7 @@ def bens_run(args, params, name, memory_type, model, loss_fn, fn_out, train_load
         # test(params, memory_type, model, loss_fn, val_loader, epoch=0, prefix='Valid', lr_scheduler=lr_scheduler, feature_transform=feature_transform, run=run)
 
         print('Start training:')
-        for epoch in range(0, args.max_epochs):
+        for epoch in range(1, params['epochs'] + 1):
             train(params, memory_type, model, loss_fn, train_loader, optimizer, epoch, fn_out, run=run)
             test(params, memory_type, model, loss_fn, val_loader, prefix='Valid', lr_scheduler=lr_scheduler, run=run)
 

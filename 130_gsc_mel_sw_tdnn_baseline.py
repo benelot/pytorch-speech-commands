@@ -138,5 +138,5 @@ if __name__ == '__main__':
 
     # TODO: This will change the acc, enable later
     # torch.manual_seed(params["seed"])
-    bens_run(args, params, name, memory, model, criterion, None, *get_gsc_dataloaders(args.n_mels, args, params['use_cuda']), optimizer, lr_scheduler)
+    bens_run(params, name, memory, model, criterion, None, *get_gsc_dataloaders(args.n_mels, args, params['use_cuda']), optimizer, lr_scheduler)
 
